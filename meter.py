@@ -15,8 +15,8 @@ from aiovelib.localsettings import SettingsService, Setting, SETTINGS_SERVICE
 logger = logging.getLogger(__name__)
 
 class LocalSettings(SettingsService, ServiceHandler):
-	pass
-		
+    pass
+
 # Text formatters
 unit_watt = lambda v: "{:.0f}W".format(v)
 unit_volt = lambda v: "{:.1f}V".format(v)
@@ -25,170 +25,205 @@ unit_kwh = lambda v: "{:.2f}kWh".format(v)
 unit_productid = lambda v: "0x{:X}".format(v)
 
 class Meter(object):
-	def __init__(self, bus_type):
-		self.bus_type = bus_type
-		self.monitor = None
-		self.service = None
-		self.position = None
-		self.destroyed = False
+    def __init__(self, bus_type):
+        self.bus_type = bus_type
+        self.monitor = None
+        self.service = None
+        self.position = None
+        self.destroyed = False
+        self.single = False
+        self.phase = None
 
-	async def wait_for_settings(self):
-		""" Attempt a connection to localsettings. If it does not show
-		    up within 5 seconds, return None. """
-		try:
-			return await asyncio.wait_for(
-				self.monitor.wait_for_service(SETTINGS_SERVICE), 5)
-		except TimeoutError:
-			pass
+    async def wait_for_settings(self):
+        """ Attempt a connection to localsettings. If it does not show
+            up within 5 seconds, return None. """
+        try:
+            return await asyncio.wait_for(
+                self.monitor.wait_for_service(SETTINGS_SERVICE), 5)
+        except TimeoutError:
+            pass
 
-		return None
-	
-	def get_settings(self):
-		""" Non-async version of the above. Return the settings object
-		    if known. Otherwise return None. """
-		return self.monitor.get_service(SETTINGS_SERVICE)
+        return None
 
-	async def start(self, host, port, data):
-		try:
-			mac = data['result']['mac']
-			fw = data['result']['fw_id']
-		except KeyError:
-			return False
+    def get_settings(self):
+        """ Non-async version of the above. Return the settings object
+            if known. Otherwise return None. """
+        return self.monitor.get_service(SETTINGS_SERVICE)
 
-		# Connect to dbus, localsettings
-		bus = await MessageBus(bus_type=self.bus_type).connect()
-		self.monitor = await Monitor.create(bus, self.settings_changed)
+    async def start(self, host, port, data):
+        try:
+            mac = data['result']['mac']
+            fw = data['result']['fw_id']
+            app_name = data['result']['app']
+            device_name = data['result'].get("name", app_name) # Use name if defined in shelly, else fallback to application (e.g. Plus1PM)
+            device_phase = None
+            if app_name == 'Plus1PM':
+                self.single = true
+            if app_name == "Plus1PM" and device_name != app_name:
+                # check if device_name has added phase-suffix-seperator ( defined as / followed by the phase as suffix)
+                try:
+                    device_name, device_phase = device_name.split('/')
+                except ValueError:
+                    device_phase = 'L1'
+                self.phase = device_phase
+        except KeyError:
+            return False
 
-		settingprefix = '/Settings/Devices/shelly_' + mac
-		logger.info("Waiting for localsettings")
-		settings = await self.wait_for_settings()
-		if settings is None:
-			logger.error("Failed to connect to localsettings")
-			return False
+        # Connect to dbus, localsettings
+        bus = await MessageBus(bus_type=self.bus_type).connect()
+        self.monitor = await Monitor.create(bus, self.settings_changed)
 
-		logger.info("Connected to localsettings")
+        settingprefix = '/Settings/Devices/shelly_' + mac
+        logger.info("Waiting for localsettings")
+        settings = await self.wait_for_settings()
+        if settings is None:
+            logger.error("Failed to connect to localsettings")
+            return False
 
-		await settings.add_settings(
-			Setting(settingprefix + "/ClassAndVrmInstance", "grid:40", 0, 0, alias="instance"),
-			Setting(settingprefix + '/Position', 0, 0, 2, alias="position")
-		)
+        logger.info("Connected to localsettings")
 
-		# Determine role and instance
-		role, instance = self.role_instance(
-			settings.get_value(settings.alias("instance")))
+        await settings.add_settings(
+            Setting(settingprefix + "/ClassAndVrmInstance", "grid:40", 0, 0, alias="instance"),
+            Setting(settingprefix + '/Position', 0, 0, 2, alias="position")
+        )
 
-		# Set up the service
-		self.service = await Service.create(bus, "com.victronenergy.{}.shelly_{}".format(role, mac))
+        # Determine role and instance
+        role, instance = self.role_instance(
+            settings.get_value(settings.alias("instance")))
 
-		self.service.add_item(TextItem('/Mgmt/ProcessName', MAIN_FILE))
-		self.service.add_item(TextItem('/Mgmt/ProcessVersion', VERSION))
-		self.service.add_item(TextItem('/Mgmt/Connection', f"WebSocket {host}:{port}"))
-		self.service.add_item(IntegerItem('/DeviceInstance', instance))
-		self.service.add_item(IntegerItem('/ProductId', 0xB034, text=unit_productid))
-		self.service.add_item(TextItem('/ProductName', "Shelly energy meter"))
-		self.service.add_item(TextItem('/FirmwareVersion', fw))
-		self.service.add_item(IntegerItem('/Connected', 1))
-		self.service.add_item(IntegerItem('/RefreshTime', 100))
+        # Set up the service
+        self.service = await Service.create(bus, "com.victronenergy.{}.shelly_{}".format(role, mac))
 
-		# Role
-		self.service.add_item(TextArrayItem('/AllowedRoles',
-			['grid', 'pvinverter', 'genset', 'acload']))
-		self.service.add_item(TextItem('/Role', role, writeable=True,
-			onchange=self.role_changed))
+        self.service.add_item(TextItem('/Mgmt/ProcessName', MAIN_FILE))
+        self.service.add_item(TextItem('/Mgmt/ProcessVersion', VERSION))
+        self.service.add_item(TextItem('/Mgmt/Connection', f"WebSocket {host}:{port}"))
+        self.service.add_item(IntegerItem('/DeviceInstance', instance))
+        self.service.add_item(IntegerItem('/ProductId', 0xB034, text=unit_productid))
+        self.service.add_item(TextItem('/ProductName', f"{device_name}"))
+        self.service.add_item(TextItem('/FirmwareVersion', fw))
+        self.service.add_item(IntegerItem('/Connected', 1))
+        self.service.add_item(IntegerItem('/RefreshTime', 100))
 
-		# Position for pvinverter
-		if role == 'pvinverter':
-			self.service.add_item(IntegerItem('/Position',
-				settings.get_value(settings.alias("position")),
-				writeable=True, onchange=self.position_changed))
+        # Role
+        self.service.add_item(TextArrayItem('/AllowedRoles',
+            ['grid', 'pvinverter', 'genset', 'acload']))
+        self.service.add_item(TextItem('/Role', role, writeable=True,
+            onchange=self.role_changed))
 
-		# Meter paths
-		self.service.add_item(DoubleItem('/Ac/Energy/Forward', None, text=unit_kwh))
-		self.service.add_item(DoubleItem('/Ac/Energy/Reverse', None, text=unit_kwh))
-		self.service.add_item(DoubleItem('/Ac/Power', None, text=unit_watt))
-		for prefix in (f"/Ac/L{x}" for x in range(1, 4)):
-			self.service.add_item(DoubleItem(prefix + '/Voltage', None, text=unit_volt))
-			self.service.add_item(DoubleItem(prefix + '/Current', None, text=unit_amp))
-			self.service.add_item(DoubleItem(prefix + '/Power', None, text=unit_watt))
-			self.service.add_item(DoubleItem(prefix + '/Energy/Forward', None, text=unit_kwh))
-			self.service.add_item(DoubleItem(prefix + '/Energy/Reverse', None, text=unit_kwh))
+        # Position for pvinverter
+        if role == 'pvinverter':
+            self.service.add_item(IntegerItem('/Position',
+                settings.get_value(settings.alias("position")),
+                writeable=True, onchange=self.position_changed))
 
-		return True
+        # Meter paths
+        self.service.add_item(DoubleItem('/Ac/Energy/Forward', None, text=unit_kwh))
+        self.service.add_item(DoubleItem('/Ac/Energy/Reverse', None, text=unit_kwh))
+        self.service.add_item(DoubleItem('/Ac/Power', None, text=unit_watt))
+        if self.single:
+            prefix = f"/Ac/{self.phase}"
+            self.service.add_item(DoubleItem(prefix + '/Voltage', None, text=unit_volt))
+            self.service.add_item(DoubleItem(prefix + '/Current', None, text=unit_amp))
+            self.service.add_item(DoubleItem(prefix + '/Power', None, text=unit_watt))
+            self.service.add_item(DoubleItem(prefix + '/Energy/Forward', None, text=unit_kwh))
+            self.service.add_item(DoubleItem(prefix + '/Energy/Reverse', None, text=unit_kwh))
 
-	def destroy(self):
-		if self.service is not None:
-			self.service.__del__()
-		self.service = None
-		self.settings = None
-		self.destroyed = True
-	
-	async def update(self, data):
-		# NotifyStatus has power, current, voltage and energy values
-		if self.service and data.get('method') == 'NotifyStatus':
-			try:
-				d = data['params']['em:0']
-			except KeyError:
-				pass
-			else:
-				with self.service as s:
-					s['/Ac/L1/Voltage'] = d["a_voltage"]
-					s['/Ac/L2/Voltage'] = d["b_voltage"]
-					s['/Ac/L3/Voltage'] = d["c_voltage"]
-					s['/Ac/L1/Current'] = d["a_current"]
-					s['/Ac/L2/Current'] = d["b_current"]
-					s['/Ac/L3/Current'] = d["c_current"]
-					s['/Ac/L1/Power'] = d["a_act_power"]
-					s['/Ac/L2/Power'] = d["b_act_power"]
-					s['/Ac/L3/Power'] = d["c_act_power"]
+            return True
 
-					s['/Ac/Power'] = d["a_act_power"] + d["b_act_power"] + d["c_act_power"]
+        for prefix in (f"/Ac/L{x}" for x in range(1, 4)):
+            self.service.add_item(DoubleItem(prefix + '/Voltage', None, text=unit_volt))
+            self.service.add_item(DoubleItem(prefix + '/Current', None, text=unit_amp))
+            self.service.add_item(DoubleItem(prefix + '/Power', None, text=unit_watt))
+            self.service.add_item(DoubleItem(prefix + '/Energy/Forward', None, text=unit_kwh))
+            self.service.add_item(DoubleItem(prefix + '/Energy/Reverse', None, text=unit_kwh))
 
-			try:
-				d = data['params']['emdata:0']
-			except KeyError:
-				pass
-			else:
-				with self.service as s:
-					s["/Ac/Energy/Forward"] = round(d["total_act"]/1000, 1)
-					s["/Ac/Energy/Reverse"] = round(d["total_act_ret"]/1000, 1)
-					s["/Ac/L1/Energy/Forward"] = round(d["a_total_act_energy"]/1000, 1)
-					s["/Ac/L1/Energy/Reverse"] = round(d["a_total_act_ret_energy"]/1000, 1)
-					s["/Ac/L2/Energy/Forward"] = round(d["b_total_act_energy"]/1000, 1)
-					s["/Ac/L2/Energy/Reverse"] = round(d["b_total_act_ret_energy"]/1000, 1)
-					s["/Ac/L3/Energy/Forward"] = round(d["c_total_act_energy"]/1000, 1)
-					s["/Ac/L3/Energy/Reverse"] = round(d["c_total_act_ret_energy"]/1000, 1)
+        return True
 
-	def role_instance(self, value):
-		val = value.split(':')
-		return val[0], int(val[1])
+    def destroy(self):
+        if self.service is not None:
+            self.service.__del__()
+        self.service = None
+        self.settings = None
+        self.destroyed = True
 
-	def settings_changed(self, service, values):
-		# Kill service, driver will restart us soon
-		if service.alias("instance") in values:
-			self.destroy()
+    async def update(self, data):
+        # NotifyStatus has power, current, voltage and energy values
+        if self.single and self.service and data.get('method') == 'NotifyStatus':
+            try:
+                d = data['params']['switch:0']
+            except KeyError:
+                pass
+            else:
+                with self.service as s:
+                    s[d"/Ac/{self.phase}/Voltage"] = d['voltage']
+                    s[d"/Ac/{self.phase}/Current"] = d['current']
+                    s[d"/Ac/{self.phase}/Power"] = d['apower']
+        else:
+            if self.service and data.get('method') == 'NotifyStatus':
+                try:
+                    d = data['params']['em:0']
+                except KeyError:
+                    pass
+                else:
+                    with self.service as s:
+                        s['/Ac/L1/Voltage'] = d["a_voltage"]
+                        s['/Ac/L2/Voltage'] = d["b_voltage"]
+                        s['/Ac/L3/Voltage'] = d["c_voltage"]
+                        s['/Ac/L1/Current'] = d["a_current"]
+                        s['/Ac/L2/Current'] = d["b_current"]
+                        s['/Ac/L3/Current'] = d["c_current"]
+                        s['/Ac/L1/Power'] = d["a_act_power"]
+                        s['/Ac/L2/Power'] = d["b_act_power"]
+                        s['/Ac/L3/Power'] = d["c_act_power"]
 
-	def role_changed(self, val):
-		if val not in ['grid', 'pvinverter', 'genset', 'acload']:
-			return False
+                        s['/Ac/Power'] = d["a_act_power"] + d["b_act_power"] + d["c_act_power"]
 
-		settings = self.get_settings()
-		if settings is None:
-			return False
+                try:
+                    d = data['params']['emdata:0']
+                except KeyError:
+                    pass
+                else:
+                    with self.service as s:
+                        s["/Ac/Energy/Forward"] = round(d["total_act"]/1000, 1)
+                        s["/Ac/Energy/Reverse"] = round(d["total_act_ret"]/1000, 1)
+                        s["/Ac/L1/Energy/Forward"] = round(d["a_total_act_energy"]/1000, 1)
+                        s["/Ac/L1/Energy/Reverse"] = round(d["a_total_act_ret_energy"]/1000, 1)
+                        s["/Ac/L2/Energy/Forward"] = round(d["b_total_act_energy"]/1000, 1)
+                        s["/Ac/L2/Energy/Reverse"] = round(d["b_total_act_ret_energy"]/1000, 1)
+                        s["/Ac/L3/Energy/Forward"] = round(d["c_total_act_energy"]/1000, 1)
+                        s["/Ac/L3/Energy/Reverse"] = round(d["c_total_act_ret_energy"]/1000, 1)
 
-		p = settings.alias("instance")
-		role, instance = self.role_instance(settings.get_value(p))
-		settings.set_value(p, "{}:{}".format(val, instance))
+    def role_instance(self, value):
+        val = value.split(':')
+        return val[0], int(val[1])
 
-		self.destroy() # restart
-		return True
+    def settings_changed(self, service, values):
+        # Kill service, driver will restart us soon
+        if service.alias("instance") in values:
+            self.destroy()
 
-	def position_changed(self, val):
-		if not 0 <= val <= 2:
-			return False
+    def role_changed(self, val):
+        if val not in ['grid', 'pvinverter', 'genset', 'acload']:
+            return False
 
-		settings = self.get_settings()
-		if settings is None:
-			return False
+        settings = self.get_settings()
+        if settings is None:
+            return False
 
-		settings.set_value(settings.alias("position"), val)
-		return True
+        p = settings.alias("instance")
+        role, instance = self.role_instance(settings.get_value(p))
+        settings.set_value(p, "{}:{}".format(val, instance))
+
+        self.destroy() # restart
+        return True
+
+    def position_changed(self, val):
+        if not 0 <= val <= 2:
+            return False
+
+        settings = self.get_settings()
+        if settings is None:
+            return False
+
+        settings.set_value(settings.alias("position"), val)
+        return True
