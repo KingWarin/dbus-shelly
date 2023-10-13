@@ -84,7 +84,7 @@ class Meter(object):
         logger.info("Connected to localsettings")
 
         await settings.add_settings(
-            Setting(settingprefix + "/ClassAndVrmInstance", "grid:40", 0, 0, alias="instance"),
+            Setting(settingprefix + "/ClassAndVrmInstance", "grid:45", 0, 0, alias="instance"),
             Setting(settingprefix + '/Position', 0, 0, 2, alias="position")
         )
 
@@ -157,10 +157,16 @@ class Meter(object):
             else:
                 logger.info("Got data: %s", d)
                 with self.service as s:
-                    s[f"/Ac/{self.phase}/Voltage"] = d.get('voltage', 0)
-                    s[f"/Ac/{self.phase}/Current"] = d.get('current', 0)
-                    s[f"/Ac/{self.phase}/Power"] = d.get('apower', 0)
-                    s[f"/Ac/Power"] = d.get('apower', 0)
+                    cVoltage = d.get('voltage', None)
+                    cCurrent = d.get('current', None)
+                    cPower = d.get('apower', None)
+                    if cVoltage:
+                        s[f"/Ac/{self.phase}/Voltage"] = cVoltage
+                    if cCurrent:
+                        s[f"/Ac/{self.phase}/Current"] = cCurrent
+                    if cPower:
+                        s[f"/Ac/{self.phase}/Power"] = cPower
+                        s[f"/Ac/Power"] = cPower
         else:
             if self.service and data.get('method') == 'NotifyStatus':
                 try:
