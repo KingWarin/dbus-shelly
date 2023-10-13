@@ -58,13 +58,14 @@ class Meter(object):
             device_name = data['result'].get("name", app_name) # Use name if defined in shelly, else fallback to application (e.g. Plus1PM)
             device_phase = None
             if app_name == 'Plus1PM':
-                self.single = true
+                self.single = True
             if app_name == "Plus1PM" and device_name != app_name:
                 # check if device_name has added phase-suffix-seperator ( defined as / followed by the phase as suffix)
                 try:
                     device_name, device_phase = device_name.split('/')
                 except ValueError:
                     device_phase = 'L1'
+
                 self.phase = device_phase
         except KeyError:
             return False
@@ -154,10 +155,12 @@ class Meter(object):
             except KeyError:
                 pass
             else:
+                logger.info("Got data: %s", d)
                 with self.service as s:
-                    s[d"/Ac/{self.phase}/Voltage"] = d['voltage']
-                    s[d"/Ac/{self.phase}/Current"] = d['current']
-                    s[d"/Ac/{self.phase}/Power"] = d['apower']
+                    s[f"/Ac/{self.phase}/Voltage"] = d.get('voltage', 0)
+                    s[f"/Ac/{self.phase}/Current"] = d.get('current', 0)
+                    s[f"/Ac/{self.phase}/Power"] = d.get('apower', 0)
+                    s[f"/Ac/Power"] = d.get('apower', 0)
         else:
             if self.service and data.get('method') == 'NotifyStatus':
                 try:
